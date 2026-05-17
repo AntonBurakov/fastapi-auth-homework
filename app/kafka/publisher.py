@@ -6,6 +6,8 @@ from uuid import uuid4
 import structlog
 from kafka import KafkaProducer
 
+from app.core.tracing import get_trace_id, trace_span
+
 
 class KafkaPublisher:
     def __init__(self, bootstrap_servers: str = "localhost:9092", topic: str = "user_events"):
@@ -33,32 +35,34 @@ class KafkaPublisher:
             "event_name": "user_registered",
             "user_id": user.id,
             "email": user.email,
+            "trace_id": get_trace_id(),
         }
 
-        attempts = 0
-        while attempts < 3:
-            try:
-                producer = self._get_producer()
-                fut = producer.send(self.topic, key=user.id, value=kafka_event)
-                fut.get(timeout=10)
-                self.logger.info("published_user_registered", kafka_event=kafka_event)
-                return True
-            except Exception as exc:
-                attempts += 1
-                self.logger.error(
-                    "publish_failed",
-                    error=str(exc),
-                    attempt=attempts,
-                    kafka_event=kafka_event,
-                )
-                self.close()
-                time.sleep(1 * attempts)
+        with trace_span("kafka.publish_user_registered", topic=self.topic, user_id=user.id):
+            attempts = 0
+            while attempts < 3:
+                try:
+                    producer = self._get_producer()
+                    fut = producer.send(self.topic, key=user.id, value=kafka_event)
+                    fut.get(timeout=10)
+                    self.logger.info("published_user_registered", kafka_event=kafka_event)
+                    return True
+                except Exception as exc:
+                    attempts += 1
+                    self.logger.error(
+                        "publish_failed",
+                        error=str(exc),
+                        attempt=attempts,
+                        kafka_event=kafka_event,
+                    )
+                    self.close()
+                    time.sleep(1 * attempts)
 
-        self.logger.warning(
-            "giving_up_publishing_user_registered",
-            kafka_event=kafka_event,
-        )
-        return False
+            self.logger.warning(
+                "giving_up_publishing_user_registered",
+                kafka_event=kafka_event,
+            )
+            return False
 
     def close(self) -> None:
         if self.producer is None:

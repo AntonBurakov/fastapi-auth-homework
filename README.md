@@ -16,7 +16,8 @@ REST-сервис на FastAPI для регистрации и авториза
 - получение информации о текущем пользователе;
 - работа с токенами доступа;
 - логирование HTTP-запросов;
-- публикация и обработка события `user_registered` через Kafka.
+- публикация и обработка события `user_registered` через Kafka;
+- базовая наблюдаемость: метрики, структурированные логи и trace_id.
 
 Основная цель проекта — продемонстрировать построение backend-приложения с production-style архитектурой:
 
@@ -25,7 +26,8 @@ REST-сервис на FastAPI для регистрации и авториза
 - middleware;
 - работа с базой данных через ORM;
 - structured logging;
-- producer / consumer взаимодействие через Kafka.
+- producer / consumer взаимодействие через Kafka;
+- observability: HTTP-метрики, JSON-логи, trace/span-like события.
 
 ---
 
@@ -41,6 +43,7 @@ REST-сервис на FastAPI для регистрации и авториза
 - Kafka
 - kafka-python
 - ZooKeeper
+- prometheus-client
 - Docker Compose
 
 ---
@@ -51,6 +54,8 @@ REST-сервис на FastAPI для регистрации и авториза
 
 ```text
 Request
+  ↓
+Observability Middleware
   ↓
 API / Routes
   ↓
@@ -72,7 +77,9 @@ fastapi-auth-homework/
 │   │       └── users.py
 │   ├── core/
 │   │   ├── logging.py
-│   │   └── security.py
+│   │   ├── metrics.py
+│   │   ├── security.py
+│   │   └── tracing.py
 │   ├── db/
 │   │   ├── base.py
 │   │   ├── models.py
@@ -158,9 +165,39 @@ Middleware для логирования HTTP-запросов.
 Логируются:
 
 * HTTP метод;
-* URL;
+* path;
 * статус ответа;
-* время выполнения запроса.
+* время выполнения запроса;
+* trace_id.
+
+Middleware также собирает HTTP-метрики:
+
+* `http_requests_total`;
+* `http_errors_total`;
+* `http_request_duration_seconds`.
+
+Метрики доступны по endpoint `/metrics` в Prometheus-формате.
+
+### Observability
+
+В проекте реализованы три базовых сигнала наблюдаемости:
+
+* метрики через `prometheus-client`;
+* структурированные JSON-логи через `structlog`;
+* базовая трассировка через `trace_id` и span-like события в логах.
+
+Для каждого HTTP-запроса middleware создаёт `trace_id`, добавляет его в JSON-логи и возвращает в заголовке ответа `X-Trace-Id`.
+
+Внутри request flow логируются отдельные шаги:
+
+* `http_request_started`;
+* `auth.register_user`;
+* `db.user.get_by_email`;
+* `db.user.create`;
+* `kafka.publish_user_registered`;
+* `http_request_finished`.
+
+Все эти записи можно связать по одному `trace_id`.
 
 ### Kafka
 
@@ -275,6 +312,24 @@ Healthcheck endpoint.
 }
 ```
 
+### GET /metrics
+
+Endpoint с метриками приложения в Prometheus-формате.
+
+Пример:
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+В ответе будут доступны, например:
+
+```text
+http_requests_total
+http_errors_total
+http_request_duration_seconds
+```
+
 # Запуск проекта
 ## 1. Создание виртуального окружения
 
@@ -330,6 +385,20 @@ Consumer читает topic `user_events`, логирует событие и в
 После запуска документация доступна по адресу:
 ```bash
 http://127.0.0.1:8000/docs
+```
+
+## Метрики
+
+Метрики доступны по адресу:
+
+```bash
+http://127.0.0.1:8000/metrics
+```
+
+Проверить через терминал:
+
+```bash
+curl http://127.0.0.1:8000/metrics
 ```
 
 # Проверка работы producer + consumer
@@ -410,3 +479,65 @@ docker compose up -d kafka-ui
 ```bash
 http://localhost:8080
 ```
+
+# Проверка observability
+
+## 1. Запустить сервис
+
+```bash
+docker compose up -d kafka
+uvicorn app.main:app --reload
+```
+
+Consumer можно запустить отдельно, если нужно показать Kafka flow:
+
+```bash
+python -m app.kafka.consumer
+```
+
+## 2. Посмотреть метрики до запроса
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+## 3. Выполнить регистрацию пользователя
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"observable@example.com","password":"password123"}'
+```
+
+В ответе будет заголовок:
+
+```text
+X-Trace-Id: <trace_id>
+```
+
+## 4. Найти request flow в логах
+
+В логах FastAPI нужно найти значение `trace_id` из ответа.
+
+По этому `trace_id` будут видны события одного запроса:
+
+```text
+http_request_started
+span_started / span_finished: auth.register_user
+span_started / span_finished: db.user.get_by_email
+span_started / span_finished: db.user.create
+span_started / span_finished: kafka.publish_user_registered
+published_user_registered
+http_request_finished
+```
+
+Логи выводятся в JSON-формате и содержат `method`, `path`, `status_code`, `duration_ms` и `trace_id`.
+
+## 5. Проверить, что метрики изменились
+
+```bash
+curl http://127.0.0.1:8000/metrics | grep http_requests_total
+curl http://127.0.0.1:8000/metrics | grep http_request_duration_seconds
+```
+
+После запросов значения счётчиков и histogram buckets должны измениться.

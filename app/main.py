@@ -1,8 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from app.api.dependencies import close_kafka_publisher
 from app.api.routes import auth, users
 from app.core.logging import setup_logging
+from app.core.metrics import CONTENT_TYPE_LATEST, render_metrics
 from app.db.base import Base
 from app.db.session import engine
 from app.middlewares.logging import LoggingMiddleware
@@ -31,3 +32,11 @@ def shutdown_event():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(
+        content=render_metrics(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
