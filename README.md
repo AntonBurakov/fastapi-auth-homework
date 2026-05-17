@@ -120,6 +120,7 @@ fastapi-auth-homework/
 │   ├── secret.yaml
 │   ├── deployment.yaml
 │   ├── service.yaml
+│   ├── ingress.yaml
 │   └── README.md
 ├── .gitignore
 └── README.md
@@ -926,6 +927,13 @@ uvicorn app.main:app --reload
 
 Для демонстрации подойдёт `kind`, `minikube` или Docker Desktop Kubernetes.
 
+В Kubernetes-части демонстрируется:
+
+* `APP_ENV=production` из ConfigMap;
+* `APP_TOKEN_SECRET` из Secret;
+* readiness/liveness probes на `/health`;
+* Ingress для доступа через `http://hello.local`.
+
 ## 1. Собрать Docker image
 
 ```bash
@@ -948,13 +956,44 @@ minikube image load fastapi-auth-homework:local
 
 Если используется Docker Desktop Kubernetes, отдельная загрузка image обычно не нужна.
 
-## 3. Применить манифесты
+## 3. Включить ingress controller
+
+Для minikube:
+
+```bash
+minikube addons enable ingress
+```
+
+Для kind или Docker Desktop Kubernetes нужен установленный ingress-nginx controller.
+
+## 4. Применить манифесты
 
 ```bash
 kubectl apply -f k8s/
 ```
 
-## 4. Проверить, что pod запущен
+## 5. Проверить ConfigMap и Secret
+
+```bash
+kubectl get configmap fastapi-auth-config -n fastapi-auth -o yaml
+kubectl get secret fastapi-auth-secret -n fastapi-auth
+```
+
+Проверить, что переменные попали в контейнер:
+
+```bash
+kubectl exec -n fastapi-auth deploy/fastapi-auth -- printenv APP_ENV
+kubectl exec -n fastapi-auth deploy/fastapi-auth -- printenv APP_TOKEN_SECRET
+```
+
+Ожидаемо:
+
+```text
+production
+local-kubernetes-demo-secret
+```
+
+## 6. Проверить, что pod запущен
 
 ```bash
 kubectl get pods -n fastapi-auth
@@ -976,7 +1015,22 @@ kubectl logs -n fastapi-auth -l app=fastapi-auth
 
 В `describe` должны быть успешные readiness/liveness probes на `/health`.
 
-## 5. Проверить Kubernetes Service
+## 7. Проверить readiness/liveness probes
+
+```bash
+kubectl describe pod -n fastapi-auth -l app=fastapi-auth
+```
+
+В выводе должны быть секции:
+
+```text
+Liveness:   http-get http://:8000/health
+Readiness:  http-get http://:8000/health
+```
+
+И pod должен быть в состоянии `READY 1/1`.
+
+## 8. Проверить Kubernetes Service
 
 ```bash
 kubectl get svc -n fastapi-auth
@@ -988,7 +1042,7 @@ kubectl get svc -n fastapi-auth
 fastapi-auth-service   ClusterIP   ...   8000/TCP
 ```
 
-## 6. Проверить доступ внутри кластера
+## 9. Проверить доступ внутри кластера
 
 Запустить временный pod с curl:
 
@@ -1018,7 +1072,46 @@ kubectl run curl-test \
   -- curl http://fastapi-auth-service.fastapi-auth.svc.cluster.local:8000/health
 ```
 
-## 7. Проверить доступ с локальной машины
+## 10. Проверить Ingress и внешний доступ
+
+Проверить, что Ingress создан:
+
+```bash
+kubectl get ingress -n fastapi-auth
+```
+
+Добавить в `/etc/hosts`:
+
+```text
+127.0.0.1 hello.local
+```
+
+Если используется minikube и ingress доступен по IP minikube, вместо `127.0.0.1` нужно использовать:
+
+```bash
+minikube ip
+```
+
+Проверить внешний доступ:
+
+```bash
+curl http://hello.local/health
+curl http://hello.local/metrics
+```
+
+Swagger UI:
+
+```text
+http://hello.local/docs
+```
+
+Ожидаемый health response:
+
+```json
+{"status":"ok"}
+```
+
+## 11. Альтернативно проверить доступ через port-forward
 
 ```bash
 kubectl port-forward svc/fastapi-auth-service 8000:8000 -n fastapi-auth
@@ -1037,10 +1130,10 @@ Swagger UI:
 http://127.0.0.1:8000/docs
 ```
 
-## 8. Проверить базовый request flow
+## 12. Проверить базовый request flow через Ingress
 
 ```bash
-curl -X POST http://127.0.0.1:8000/auth/register \
+curl -X POST http://hello.local/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"k8s@example.com","password":"password123"}'
 ```
@@ -1048,14 +1141,14 @@ curl -X POST http://127.0.0.1:8000/auth/register \
 Login:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/auth/login \
+curl -X POST http://hello.local/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"k8s@example.com","password":"password123"}'
 ```
 
 В Kubernetes-демо `VAULT_ENABLED=false`, `KAFKA_ENABLED=false`, а `APP_TOKEN_SECRET` берётся из Kubernetes Secret `fastapi-auth-secret`.
 
-## 9. Удалить ресурсы
+## 13. Удалить ресурсы
 
 ```bash
 kubectl delete -f k8s/

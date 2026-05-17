@@ -4,6 +4,7 @@ metadata:
   name: fastapi-auth-config
   namespace: fastapi-auth
 data:
+  APP_ENV: "production"
   CONSUL_ENABLED: "false"
   VAULT_ENABLED: "false"
   KAFKA_ENABLED: "false"
