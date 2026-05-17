@@ -28,7 +28,8 @@ REST-сервис на FastAPI для регистрации и авториза
 - structured logging;
 - producer / consumer взаимодействие через Kafka;
 - observability: HTTP-метрики, JSON-логи, trace/span-like события;
-- service discovery через Consul.
+- service discovery через Consul;
+- получение секрета подписи токенов из Vault.
 
 ---
 
@@ -46,6 +47,7 @@ REST-сервис на FastAPI для регистрации и авториза
 - ZooKeeper
 - prometheus-client
 - Consul
+- Vault
 - Docker Compose
 
 ---
@@ -68,6 +70,9 @@ Services
 Repositories
   ↓            Kafka Producer → Kafka Topic → Kafka Consumer
 Database
+
+Secrets:
+Vault → token_secret → app/core/security.py
 ```
 
 # Структура проекта
@@ -84,7 +89,8 @@ fastapi-auth-homework/
 │   │   ├── logging.py
 │   │   ├── metrics.py
 │   │   ├── security.py
-│   │   └── tracing.py
+│   │   ├── tracing.py
+│   │   └── vault.py
 │   ├── db/
 │   │   ├── base.py
 │   │   ├── models.py
@@ -228,6 +234,34 @@ Consul выполняет HTTP health check endpoint `/health`.
 * `SERVICE_ADDRESS`;
 * `SERVICE_PORT`;
 * `SERVICE_HEALTH_CHECK_URL`.
+
+### Vault
+
+Секрет для подписи access token хранится в Vault, а не в исходном коде.
+
+Приложение читает ключ `token_secret` из KV v2 path:
+
+```text
+secret/data/fastapi-auth
+```
+
+Схема доступа:
+
+1. Vault запускается отдельно.
+2. В Vault записывается секрет `token_secret`.
+3. В Vault создаётся policy только на чтение `secret/data/fastapi-auth`.
+4. Для FastAPI создаётся отдельный service token с этой policy.
+5. FastAPI получает адрес Vault через `VAULT_ADDR`.
+6. FastAPI аутентифицируется в Vault через `VAULT_TOKEN`.
+7. `app/core/security.py` использует секрет для HMAC-подписи mock access token.
+
+Переменные окружения:
+
+* `VAULT_ENABLED`;
+* `VAULT_ADDR`;
+* `VAULT_TOKEN`;
+* `VAULT_TOKEN_SECRET_PATH`;
+* `APP_TOKEN_SECRET` — только для локального fallback-режима при `VAULT_ENABLED=false`.
 
 ### Kafka
 
@@ -407,15 +441,64 @@ Consul UI будет доступен по адресу:
 http://localhost:8500
 ```
 
-## 6. Запуск приложения
+## 6. Запуск Vault
 
 ```bash
+docker compose up -d vault
+```
+
+Dev Vault будет доступен по адресу:
+
+```bash
+http://localhost:8200
+```
+
+Для локальной демонстрации используется dev token:
+
+```bash
+dev-root-token
+```
+
+Записать секрет для подписи токенов:
+
+```bash
+curl -X POST http://localhost:8200/v1/secret/data/fastapi-auth \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"token_secret":"local-demo-token-secret"}}'
+```
+
+Создать policy только на чтение этого секрета:
+
+```bash
+curl -X PUT http://localhost:8200/v1/sys/policies/acl/fastapi-auth-read \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"policy":"path \"secret/data/fastapi-auth\" { capabilities = [\"read\"] }"}'
+```
+
+Создать отдельный service token для приложения:
+
+```bash
+curl -X POST http://localhost:8200/v1/auth/token/create \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"policies":["fastapi-auth-read"],"ttl":"1h"}'
+```
+
+Из ответа нужно взять значение `auth.client_token`.
+
+## 7. Запуск приложения
+
+```bash
+VAULT_ADDR=http://localhost:8200 \
+VAULT_TOKEN=<client_token> \
 uvicorn app.main:app --reload
 ```
 
 При старте приложение зарегистрирует сервис `fastapi-auth` в Consul.
 
-## 7. Запуск consumer
+## 8. Запуск consumer
 
 В отдельном терминале:
 
@@ -496,7 +579,7 @@ curl -X POST http://127.0.0.1:8000/auth/login \
 
 ```json
 {
-  "access_token": "mock-token-1",
+  "access_token": "mock-token-1.<signature>",
   "token_type": "bearer"
 }
 ```
@@ -505,7 +588,7 @@ curl -X POST http://127.0.0.1:8000/auth/login \
 
 ```bash
 curl http://127.0.0.1:8000/users/me \
-  -H "Authorization: Bearer mock-token-1"
+  -H "Authorization: Bearer mock-token-1.<signature>"
 ```
 
 # Kafka UI
@@ -677,3 +760,132 @@ curl http://localhost:8500/v1/catalog/service/fastapi-auth
 ```
 
 Чтобы явно показать отказ именно через health check, можно завершить процесс нештатно или временно запустить приложение на другом порту без изменения `SERVICE_HEALTH_CHECK_URL`.
+
+# Проверка Vault
+
+## 1. Запустить Vault
+
+```bash
+docker compose up -d vault
+```
+
+## 2. Записать секрет в Vault
+
+```bash
+curl -X POST http://localhost:8200/v1/secret/data/fastapi-auth \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"token_secret":"local-demo-token-secret"}}'
+```
+
+Проверить, что секрет читается:
+
+```bash
+curl http://localhost:8200/v1/secret/data/fastapi-auth \
+  -H "X-Vault-Token: dev-root-token"
+```
+
+В ответе должен быть ключ `token_secret`.
+
+## 3. Создать policy и service token
+
+Создать policy с доступом только на чтение секрета приложения:
+
+```bash
+curl -X PUT http://localhost:8200/v1/sys/policies/acl/fastapi-auth-read \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"policy":"path \"secret/data/fastapi-auth\" { capabilities = [\"read\"] }"}'
+```
+
+Создать отдельный token для FastAPI:
+
+```bash
+curl -X POST http://localhost:8200/v1/auth/token/create \
+  -H "X-Vault-Token: dev-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"policies":["fastapi-auth-read"],"ttl":"1h"}'
+```
+
+Из ответа нужно взять значение:
+
+```text
+auth.client_token
+```
+
+Root token используется только для настройки dev Vault. Приложение запускается с отдельным token, у которого есть только право читать нужный секрет.
+
+## 4. Запустить FastAPI с доступом к Vault
+
+```bash
+VAULT_ADDR=http://localhost:8200 \
+VAULT_TOKEN=<client_token> \
+uvicorn app.main:app --reload
+```
+
+## 5. Проверить, что сервис использует секрет из Vault
+
+Зарегистрировать пользователя:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"vault@example.com","password":"password123"}'
+```
+
+Выполнить login:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"vault@example.com","password":"password123"}'
+```
+
+В логах приложения должна появиться запись:
+
+```text
+vault_secret_loaded
+```
+
+В ответе будет access token вида:
+
+```text
+mock-token-<user_id>.<signature>
+```
+
+Подпись строится через HMAC и секрет `token_secret`, полученный из Vault.
+
+## 6. Проверить, что токен валиден
+
+Подставить полученный `access_token`:
+
+```bash
+curl http://127.0.0.1:8000/users/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Ожидаемый результат: данные текущего пользователя.
+
+## 7. Показать сценарий отказа
+
+Запустить приложение без `VAULT_TOKEN`:
+
+```bash
+VAULT_ADDR=http://localhost:8200 uvicorn app.main:app --reload
+```
+
+После этого запрос `/auth/login` не сможет выдать токен, потому что приложению нечем аутентифицироваться в Vault.
+
+Это демонстрирует, что секрет не хранится в коде и сервис зависит от централизованного хранилища секретов.
+
+## 8. Локальный fallback без Vault
+
+Для разработки можно явно отключить Vault и передать секрет через окружение:
+
+```bash
+VAULT_ENABLED=false \
+APP_TOKEN_SECRET=local-only-secret \
+uvicorn app.main:app --reload
+```
+
+В обычном сценарии сдачи используется Vault.

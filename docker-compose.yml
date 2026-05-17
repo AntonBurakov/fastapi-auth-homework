@@ -1,4 +1,15 @@
 services:
+  vault:
+    image: hashicorp/vault:1.16
+    container_name: fastapi-auth-vault
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+
   consul:
     image: hashicorp/consul:1.20
     container_name: fastapi-auth-consul

@@ -1,4 +1,9 @@
+import hashlib
+import hmac
+
 from passlib.context import CryptContext
+
+from app.core.vault import get_token_secret
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -12,7 +17,14 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def create_mock_token(user_id: int) -> str:
-    return f"mock-token-{user_id}"
+    payload = str(user_id)
+    signature = hmac.new(
+        get_token_secret().encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return f"mock-token-{payload}.{signature}"
 
 
 def parse_mock_token(token: str) -> int | None:
@@ -21,7 +33,21 @@ def parse_mock_token(token: str) -> int | None:
     if not token.startswith(prefix):
         return None
 
+    raw_token = token.removeprefix(prefix)
+
     try:
-        return int(token.removeprefix(prefix))
+        user_id_raw, signature = raw_token.split(".", maxsplit=1)
+        user_id = int(user_id_raw)
     except ValueError:
         return None
+
+    expected_signature = hmac.new(
+        get_token_secret().encode("utf-8"),
+        user_id_raw.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+
+    return user_id
