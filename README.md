@@ -27,7 +27,8 @@ REST-сервис на FastAPI для регистрации и авториза
 - работа с базой данных через ORM;
 - structured logging;
 - producer / consumer взаимодействие через Kafka;
-- observability: HTTP-метрики, JSON-логи, trace/span-like события.
+- observability: HTTP-метрики, JSON-логи, trace/span-like события;
+- service discovery через Consul.
 
 ---
 
@@ -44,6 +45,7 @@ REST-сервис на FastAPI для регистрации и авториза
 - kafka-python
 - ZooKeeper
 - prometheus-client
+- Consul
 - Docker Compose
 
 ---
@@ -54,6 +56,8 @@ REST-сервис на FastAPI для регистрации и авториза
 
 ```text
 Request
+  ↓
+Consul Service Discovery
   ↓
 Observability Middleware
   ↓
@@ -76,6 +80,7 @@ fastapi-auth-homework/
 │   │       ├── auth.py
 │   │       └── users.py
 │   ├── core/
+│   │   ├── consul.py
 │   │   ├── logging.py
 │   │   ├── metrics.py
 │   │   ├── security.py
@@ -198,6 +203,31 @@ Middleware также собирает HTTP-метрики:
 * `http_request_finished`.
 
 Все эти записи можно связать по одному `trace_id`.
+
+### Consul
+
+Приложение регистрирует FastAPI-сервис в Consul при старте и снимает регистрацию при остановке.
+
+Параметры по умолчанию:
+
+* service name: `fastapi-auth`;
+* service id: `fastapi-auth-8000`;
+* service address: `127.0.0.1`;
+* service port: `8000`;
+* health check: `http://host.docker.internal:8000/health`.
+
+Consul выполняет HTTP health check endpoint `/health`.
+Сервис можно найти по логическому имени `fastapi-auth` через Consul UI, HTTP API или DNS-имя `fastapi-auth.service.consul`.
+
+Переменные окружения для настройки:
+
+* `CONSUL_ENABLED`;
+* `CONSUL_HTTP_ADDR`;
+* `SERVICE_NAME`;
+* `SERVICE_ID`;
+* `SERVICE_ADDRESS`;
+* `SERVICE_PORT`;
+* `SERVICE_HEALTH_CHECK_URL`.
 
 ### Kafka
 
@@ -365,13 +395,27 @@ Topic `user_events` создаётся автоматически при пер�
 
 При первом запуске контейнерам может понадобиться несколько секунд, чтобы полностью стартовать.
 
-## 5. Запуск приложения
+## 5. Запуск Consul
+
+```bash
+docker compose up -d consul
+```
+
+Consul UI будет доступен по адресу:
+
+```bash
+http://localhost:8500
+```
+
+## 6. Запуск приложения
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-## 6. Запуск consumer
+При старте приложение зарегистрирует сервис `fastapi-auth` в Consul.
+
+## 7. Запуск consumer
 
 В отдельном терминале:
 
@@ -541,3 +585,95 @@ curl http://127.0.0.1:8000/metrics | grep http_request_duration_seconds
 ```
 
 После запросов значения счётчиков и histogram buckets должны измениться.
+
+# Проверка Consul service discovery
+
+## 1. Запустить Consul
+
+```bash
+docker compose up -d consul
+```
+
+## 2. Запустить FastAPI
+
+```bash
+uvicorn app.main:app --reload
+```
+
+В логах приложения должна появиться запись:
+
+```text
+consul_service_registered
+```
+
+## 3. Проверить регистрацию сервиса
+
+Через Consul HTTP API:
+
+```bash
+curl http://localhost:8500/v1/catalog/service/fastapi-auth
+```
+
+Ожидаемый результат: JSON со службой `fastapi-auth`, адресом `127.0.0.1` и портом `8000`.
+
+Через Consul UI:
+
+```bash
+http://localhost:8500
+```
+
+В разделе Services должен быть сервис `fastapi-auth`.
+
+## 4. Проверить health check
+
+```bash
+curl 'http://localhost:8500/v1/health/service/fastapi-auth?passing'
+```
+
+Если приложение работает, Consul вернёт сервис в списке passing checks.
+
+Также можно открыть сервис в Consul UI и увидеть зелёный health check.
+
+## 5. Проверить доступ по логическому имени
+
+Через Consul DNS:
+
+```bash
+dig @127.0.0.1 -p 8600 fastapi-auth.service.consul
+```
+
+Ожидаемый результат: DNS-ответ с адресом `127.0.0.1`.
+
+Проверить порт через SRV-запись:
+
+```bash
+dig @127.0.0.1 -p 8600 fastapi-auth.service.consul SRV
+```
+
+Ожидаемый результат: SRV-запись с портом `8000`.
+
+После этого сервис доступен по найденному адресу:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+## 6. Показать сценарий отказа
+
+Остановить FastAPI через `Ctrl+C`.
+
+Подождать 10-20 секунд и проверить health:
+
+```bash
+curl 'http://localhost:8500/v1/health/service/fastapi-auth'
+```
+
+Ожидаемый результат: check перейдёт в состояние `critical`, потому что Consul больше не может открыть `/health`.
+
+Если приложение завершилось штатно, оно также отправит deregister в Consul. Тогда сервис может исчезнуть из каталога:
+
+```bash
+curl http://localhost:8500/v1/catalog/service/fastapi-auth
+```
+
+Чтобы явно показать отказ именно через health check, можно завершить процесс нештатно или временно запустить приложение на другом порту без изменения `SERVICE_HEALTH_CHECK_URL`.

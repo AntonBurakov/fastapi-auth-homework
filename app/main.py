@@ -2,6 +2,7 @@ from fastapi import FastAPI, Response
 
 from app.api.dependencies import close_kafka_publisher
 from app.api.routes import auth, users
+from app.core.consul import deregister_service, register_service
 from app.core.logging import setup_logging
 from app.core.metrics import CONTENT_TYPE_LATEST, render_metrics
 from app.db.base import Base
@@ -24,8 +25,14 @@ app.include_router(auth.router)
 app.include_router(users.router)
 
 
+@app.on_event("startup")
+def startup_event():
+    register_service()
+
+
 @app.on_event("shutdown")
 def shutdown_event():
+    deregister_service()
     close_kafka_publisher()
 
 
