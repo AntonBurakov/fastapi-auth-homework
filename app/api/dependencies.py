@@ -1,0 +1,68 @@
+from typing import Annotated
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+from app.core.security import parse_mock_token
+from app.db.models import User
+from app.db.session import SessionLocal
+from app.repositories.user import UserRepository
+from app.services.auth import AuthService
+
+security = HTTPBearer()
+
+
+def get_db():
+    db = SessionLocal()
+
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_user_repository(
+    db: Annotated[Session, Depends(get_db)],
+) -> UserRepository:
+    return UserRepository(db)
+
+
+def get_auth_service(
+    user_repo: Annotated[
+        UserRepository,
+        Depends(get_user_repository),
+    ],
+) -> AuthService:
+    return AuthService(user_repo)
+
+
+def get_current_user(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials,
+        Depends(security),
+    ],
+    user_repo: Annotated[
+        UserRepository,
+        Depends(get_user_repository),
+    ],
+) -> User:
+    token = credentials.credentials
+
+    user_id = parse_mock_token(token)
+
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+    user = user_repo.get_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    return user
