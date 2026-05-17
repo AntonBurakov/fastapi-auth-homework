@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastapi-auth-config
+  namespace: fastapi-auth
+data:
+  CONSUL_ENABLED: "false"
+  VAULT_ENABLED: "false"
+  KAFKA_ENABLED: "false"
+  KAFKA_BOOTSTRAP: "kafka:9092"
+  KAFKA_TOPIC: "user_events"

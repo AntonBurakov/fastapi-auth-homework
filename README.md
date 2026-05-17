@@ -29,7 +29,8 @@ REST-сервис на FastAPI для регистрации и авториза
 - producer / consumer взаимодействие через Kafka;
 - observability: HTTP-метрики, JSON-логи, trace/span-like события;
 - service discovery через Consul;
-- получение секрета подписи токенов из Vault.
+- получение секрета подписи токенов из Vault;
+- деплой FastAPI-сервиса в локальный Kubernetes-кластер.
 
 ---
 
@@ -49,6 +50,7 @@ REST-сервис на FastAPI для регистрации и авториза
 - Consul
 - Vault
 - Docker Compose
+- Kubernetes
 
 ---
 
@@ -110,6 +112,15 @@ fastapi-auth-homework/
 │   └── main.py
 ├── requirements.txt
 ├── docker-compose.yml
+├── Dockerfile
+├── .dockerignore
+├── k8s/
+│   ├── namespace.yaml
+│   ├── configmap.yaml
+│   ├── secret.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── README.md
 ├── .gitignore
 └── README.md
 ```
@@ -262,6 +273,25 @@ secret/data/fastapi-auth
 * `VAULT_TOKEN`;
 * `VAULT_TOKEN_SECRET_PATH`;
 * `APP_TOKEN_SECRET` — только для локального fallback-режима при `VAULT_ENABLED=false`.
+
+### Kubernetes
+
+Для локального кластера добавлены базовые манифесты в папке `k8s/`:
+
+* `Namespace`;
+* `ConfigMap`;
+* `Secret`;
+* `Deployment`;
+* `Service`.
+
+В Kubernetes-сценарии приложение запускается в одном pod, использует SQLite в `emptyDir` volume и доступно внутри кластера через service:
+
+```text
+fastapi-auth-service.fastapi-auth.svc.cluster.local:8000
+```
+
+Consul, Vault и Kafka в Kubernetes-демо отключены через env, чтобы показать именно базовый деплой FastAPI-сервиса без дополнительных внешних зависимостей.
+Секрет подписи токенов передаётся через Kubernetes Secret.
 
 ### Kafka
 
@@ -889,3 +919,144 @@ uvicorn app.main:app --reload
 ```
 
 В обычном сценарии сдачи используется Vault.
+
+# Деплой в локальный Kubernetes-кластер
+
+Минимальные манифесты находятся в папке `k8s/`.
+
+Для демонстрации подойдёт `kind`, `minikube` или Docker Desktop Kubernetes.
+
+## 1. Собрать Docker image
+
+```bash
+docker build -t fastapi-auth-homework:local .
+```
+
+## 2. Загрузить image в локальный кластер
+
+Для kind:
+
+```bash
+kind load docker-image fastapi-auth-homework:local
+```
+
+Для minikube:
+
+```bash
+minikube image load fastapi-auth-homework:local
+```
+
+Если используется Docker Desktop Kubernetes, отдельная загрузка image обычно не нужна.
+
+## 3. Применить манифесты
+
+```bash
+kubectl apply -f k8s/
+```
+
+## 4. Проверить, что pod запущен
+
+```bash
+kubectl get pods -n fastapi-auth
+```
+
+Ожидаемый результат:
+
+```text
+NAME                            READY   STATUS    RESTARTS
+fastapi-auth-...                1/1     Running   0
+```
+
+Подробная проверка:
+
+```bash
+kubectl describe pod -n fastapi-auth -l app=fastapi-auth
+kubectl logs -n fastapi-auth -l app=fastapi-auth
+```
+
+В `describe` должны быть успешные readiness/liveness probes на `/health`.
+
+## 5. Проверить Kubernetes Service
+
+```bash
+kubectl get svc -n fastapi-auth
+```
+
+Ожидаемый service:
+
+```text
+fastapi-auth-service   ClusterIP   ...   8000/TCP
+```
+
+## 6. Проверить доступ внутри кластера
+
+Запустить временный pod с curl:
+
+```bash
+kubectl run curl-test \
+  --rm -it \
+  --restart=Never \
+  --image=curlimages/curl \
+  -n fastapi-auth \
+  -- curl http://fastapi-auth-service:8000/health
+```
+
+Ожидаемый ответ:
+
+```json
+{"status":"ok"}
+```
+
+Проверка по полному DNS-имени внутри кластера:
+
+```bash
+kubectl run curl-test \
+  --rm -it \
+  --restart=Never \
+  --image=curlimages/curl \
+  -n fastapi-auth \
+  -- curl http://fastapi-auth-service.fastapi-auth.svc.cluster.local:8000/health
+```
+
+## 7. Проверить доступ с локальной машины
+
+```bash
+kubectl port-forward svc/fastapi-auth-service 8000:8000 -n fastapi-auth
+```
+
+В другом терминале:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/metrics
+```
+
+Swagger UI:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## 8. Проверить базовый request flow
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"k8s@example.com","password":"password123"}'
+```
+
+Login:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"k8s@example.com","password":"password123"}'
+```
+
+В Kubernetes-демо `VAULT_ENABLED=false`, `KAFKA_ENABLED=false`, а `APP_TOKEN_SECRET` берётся из Kubernetes Secret `fastapi-auth-secret`.
+
+## 9. Удалить ресурсы
+
+```bash
+kubectl delete -f k8s/
+```

@@ -16,6 +16,14 @@ security = HTTPBearer()
 _kafka_publisher: KafkaPublisher | None = None
 
 
+def _env_bool(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def get_db():
     db = SessionLocal()
 
@@ -61,6 +69,9 @@ def get_auth_service(
         Depends(get_kafka_publisher),
     ],
 ) -> AuthService:
+    if not _env_bool("KAFKA_ENABLED", default=True):
+        publisher = None
+
     return AuthService(user_repo, publisher)
 
 

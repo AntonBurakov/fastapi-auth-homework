@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-auth
+  namespace: fastapi-auth
+  labels:
+    app: fastapi-auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastapi-auth
+  template:
+    metadata:
+      labels:
+        app: fastapi-auth
+    spec:
+      containers:
+        - name: fastapi-auth
+          image: fastapi-auth-homework:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: fastapi-auth-config
+            - secretRef:
+                name: fastapi-auth-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: app-data
+              mountPath: /app/app_data
+      volumes:
+        - name: app-data
+          emptyDir: {}
